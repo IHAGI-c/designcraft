@@ -1164,6 +1164,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "designcraft-wasm"
+version = "0.6.0"
+dependencies = [
+ "designcraft-engine",
+ "designcraft-fonts",
+ "designcraft-format",
+ "designcraft-geom",
+ "designcraft-render",
+ "image",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "designcraft-web"
 version = "0.6.0"
 dependencies = [
