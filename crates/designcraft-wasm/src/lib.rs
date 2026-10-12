@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use designcraft_engine::doc::{Document, SpreadRef};
+use designcraft_engine::doc::{Content, Document, SpreadRef};
 use designcraft_engine::{DocState, Session};
 use designcraft_geom::{Affine, Vec2};
 use designcraft_render::{Placed, RenderOptions, Renderer};
@@ -22,6 +22,11 @@ pub struct Engine {
     y: u32,
     /// The document as last drawn (what the host canvas shows) — damage is measured against it.
     shown: Option<Arc<Document>>,
+}
+
+/// Screen drawing: hairlines at least one device pixel (the file keeps its weights — same rule as the host app's PPT viewer).
+fn screen() -> RenderOptions {
+    RenderOptions { min_stroke_px: 1.0, ..RenderOptions::default() }
 }
 
 fn err(e: impl std::fmt::Display) -> JsError {
@@ -62,7 +67,7 @@ impl Engine {
         let st = self.session.doc().map_err(err)?;
         let img = self
             .renderer
-            .render_page(&st.doc, &self.session.cache, abs, scale, false, &RenderOptions::default())
+            .render_page(&st.doc, &self.session.cache, abs, scale, false, &screen())
             .ok_or_else(|| err("no such page"))?;
         self.width = img.width;
         self.height = img.height;
@@ -116,7 +121,7 @@ impl Engine {
         let (x1, y1) = (((x1 / T).ceil() * T).min(pw), ((y1 / T).ceil() * T).min(ph));
         // Same transform as `render_page`, shifted by whole pixels — the patch's pixels equal the full page's.
         let view = Affine::translate(Vec2::new(-x0, -y0)) * Affine::scale(scale) * Affine::translate(-page.origin().to_vec2());
-        let mut o = RenderOptions::default();
+        let mut o = screen();
         o.background = Some([255, 255, 255, 255]);
         let placed = [Placed { spread: SpreadRef::Doc(si), xf: Affine::translate(Vec2::ZERO) }];
         let img = self.renderer.render(&doc, &self.session.cache, &placed, (x1 - x0) as u32, (y1 - y0) as u32, view, &o);
@@ -125,6 +130,75 @@ impl Engine {
         self.width = img.width;
         self.height = img.height;
         Ok(img.to_straight())
+    }
+
+    /// Top-level items on page `abs` (page coordinates, pt), front-most last, as JSON:
+    /// `[{id, kind: text|picture|group|shape|line, box, label?, story?, ink?, text?}]` — `box` = visible bounds,
+    /// text frames add `ink` (where the composed lines sit — the frame can be taller than its text) and the
+    /// part of the story shown in the frame.
+    pub fn items(&self, abs: usize) -> Result<String, JsError> {
+        let doc = &self.session.doc().map_err(err)?.doc;
+        let (si, pi) = doc.page_loc(abs).ok_or_else(|| err("no such page"))?;
+        let sp = doc.spreads.get(si).ok_or_else(|| err("no such page"))?;
+        let page = sp.pages.get(pi).ok_or_else(|| err("no such page"))?.bounds();
+        let rel = |v: [f64; 4]| [v[0] - page.x0, v[1] - page.y0, v[2] - page.x0, v[3] - page.y0];
+        let mut out = Vec::new();
+        for it in &sp.items {
+            let b = it.visible_bounds();
+            if b.x1 <= page.x0 || b.x0 >= page.x1 || it.hidden || it.opacity <= 0.0 {
+                continue;
+            }
+            let kind = match &it.content {
+                Content::Text(_) => "text",
+                Content::Graphic(_) => "picture",
+                Content::Group { .. } => "group",
+                Content::Unassigned if b.width() < 2.0 || b.height() < 2.0 => "line",
+                Content::Unassigned => "shape",
+            };
+            let mut v = serde_json::json!({"id": it.id.0, "kind": kind, "box": rel([b.x0, b.y0, b.x1, b.y1])});
+            if !it.label.is_empty() {
+                v["label"] = serde_json::json!(it.label);
+            }
+            if let Content::Text(t) = &it.content {
+                let cs = self.session.cache.get(doc, t.story, None);
+                if let Some(ft) = cs.frame(it.id) {
+                    let xf = doc.text_xf(it);
+                    let mut ink: Option<[f64; 4]> = None;
+                    for l in &ft.lines {
+                        let Some(g0) = l.glyphs.iter().find(|g| g.visible) else { continue };
+                        let r = designcraft_geom::Rect::new(g0.x, l.baseline - l.ascent, l.end_x, l.baseline + l.descent);
+                        let q = xf.transform_rect_bbox(r);
+                        ink = Some(ink.map_or([q.x0, q.y0, q.x1, q.y1], |a| [a[0].min(q.x0), a[1].min(q.y0), a[2].max(q.x1), a[3].max(q.y1)]));
+                    }
+                    v["story"] = serde_json::json!(t.story.0);
+                    v["text"] = serde_json::json!(doc.story(t.story).and_then(|st| st.text.get(ft.range.clone())).unwrap_or(""));
+                    if let Some(i) = ink {
+                        v["ink"] = serde_json::json!(rel(i));
+                    }
+                }
+            }
+            out.push(v);
+        }
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
+    /// Page `abs` in pt `[width, height, x0, y0]` — x0/y0 = its origin in spread coordinates
+    /// (commands such as `transform.resize` take spread coordinates; `frames` reports page coordinates).
+    #[wasm_bindgen(js_name = pageSize)]
+    pub fn page_size(&self, abs: usize) -> Result<Vec<f64>, JsError> {
+        let doc = &self.session.doc().map_err(err)?.doc;
+        let (si, pi) = doc.page_loc(abs).ok_or_else(|| err("no such page"))?;
+        let p = doc.spreads.get(si).and_then(|s| s.pages.get(pi)).ok_or_else(|| err("no such page"))?.bounds();
+        Ok(vec![p.width(), p.height(), p.x0, p.y0])
+    }
+
+    /// Close every open document (keeps fonts) — call before opening another page so memory doesn't grow.
+    #[wasm_bindgen(js_name = closeAll)]
+    pub fn close_all(&mut self) {
+        while !self.session.documents().is_empty() {
+            self.session.close_document(0);
+        }
+        self.shown = None;
     }
 
     #[wasm_bindgen(getter)]

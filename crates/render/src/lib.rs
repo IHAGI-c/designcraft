@@ -154,6 +154,10 @@ pub struct RenderOptions {
     /// Screen: spreads with transparency are shown as blended in the document's blend space (a
     /// CMYK blend space keeps their colours in the working CMYK gamut).
     pub blend_space_view: bool,
+    /// Screen view: draw strokes thinner than this many device pixels at this width (0 = true width).
+    /// Hairlines (0.25–0.3 pt rules, icon outlines) otherwise fade to a faint grey at screen resolutions,
+    /// while print and PDF export keep the document's weight.
+    pub min_stroke_px: f64,
 }
 
 /// View › Display Performance: how placed graphics and effects are drawn on screen.
@@ -191,6 +195,7 @@ impl Default for RenderOptions {
             rich_black: false,
             overprint_preview: false,
             blend_space_view: false,
+            min_stroke_px: 0.0,
         }
     }
 }
@@ -623,7 +628,12 @@ impl Renderer {
     fn draw_stroke(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, bp: &BezPath, xf: Affine) {
         let st = &it.stroke;
         let Some(c) = f.doc.resolve_color(&st.swatch, st.tint) else { return };
-        let mut stroke = kurbo::Stroke::new(st.weight)
+        // Screen hairlines: one device pixel, lighter by how much thinner the real line is (same ink on screen, no grey blur)
+        let k = (f.view * xf).determinant().abs().sqrt();
+        let min = f.opts.min_stroke_px;
+        let (weight, fade) =
+            if min > 0.0 && k > 0.0 && st.weight > 0.0 && st.weight * k < min { (min / k, (st.weight * k / min) as f32) } else { (st.weight, 1.0) };
+        let mut stroke = kurbo::Stroke::new(weight)
             .with_caps(match st.cap {
                 designcraft_doc::Cap::Butt => kurbo::Cap::Butt,
                 designcraft_doc::Cap::Round => kurbo::Cap::Round,
@@ -642,7 +652,7 @@ impl Renderer {
             _ => {}
         }
         ctx.set_transform(f.view * xf);
-        ctx.set_paint(color_of(&c, 1.0));
+        ctx.set_paint(color_of(&c, fade));
         let closed = it.path.is_closed();
         // Arrowheads: the path is shortened under them; they're drawn after it.
         let arrows = designcraft_doc::arrow::apply(bp, st, closed);
@@ -669,7 +679,7 @@ impl Renderer {
             if op {
                 ctx.pop_layer();
             }
-            ctx.set_paint(color_of(&c, 1.0));
+            ctx.set_paint(color_of(&c, fade));
         }
         // Stripes, wavy and hash strokes are fills (along the path's centre line).
         if let Some(o) = kind.outline(bp, st.weight, 0.05 * f.px) {
