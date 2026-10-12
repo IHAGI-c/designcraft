@@ -220,6 +220,37 @@ impl Engine {
         Ok(serde_json::json!({"story": ts.story.0, "anchor": ts.anchor, "focus": ts.focus, "frame": frame, "caret": caret, "quads": quads}).to_string())
     }
 
+    /// The bytes of the picture placed in item `id` (PNG/JPEG/…), for host-side picture adjustments.
+    #[wasm_bindgen(js_name = graphicBytes)]
+    pub fn graphic_bytes(&self, id: u64) -> Result<Vec<u8>, JsError> {
+        let doc = &self.session.doc().map_err(err)?.doc;
+        let it = doc.item(designcraft_engine::doc::ItemId(id)).ok_or_else(|| err("no such item"))?;
+        let Content::Graphic(g) = &it.content else { return Err(err("not a picture")) };
+        let a = doc.assets.get(&g.asset).ok_or_else(|| err("no such picture"))?;
+        Ok(a.data.to_vec())
+    }
+
+    /// Replace the picture in item `id` with `bytes` (an adjusted copy) — one undoable step, every placement of it.
+    #[wasm_bindgen(js_name = replaceGraphic)]
+    pub fn replace_graphic(&mut self, id: u64, bytes: Vec<u8>) -> Result<(), JsError> {
+        let px = designcraft_render::image_size(&bytes).ok_or_else(|| err("unsupported or corrupt image"))?;
+        let mime = designcraft_render::image_mime(&bytes).to_string();
+        self.session
+            .edit(|d, _| {
+                let it = d.item(designcraft_engine::doc::ItemId(id)).ok_or(designcraft_engine::doc::DocError::NoItem(designcraft_engine::doc::ItemId(id)))?;
+                let Content::Graphic(g) = &it.content else { return Ok(()) };
+                let aid = g.asset;
+                if let Some(a) = d.assets.get_mut(&aid) {
+                    let a = Arc::make_mut(a);
+                    a.mime = mime.clone();
+                    a.data = Arc::new(bytes.clone());
+                    a.pixels = Some(px);
+                }
+                Ok(())
+            })
+            .map_err(err)
+    }
+
     /// Page `abs` in pt `[width, height, x0, y0]` — x0/y0 = its origin in spread coordinates
     /// (commands such as `transform.resize` take spread coordinates; `frames` reports page coordinates).
     #[wasm_bindgen(js_name = pageSize)]
