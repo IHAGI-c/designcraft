@@ -168,6 +168,57 @@ impl Engine {
         Ok(serde_json::Value::Array(out).to_string())
     }
 
+    /// The text caret or selection on page `abs` as JSON, or `null` when no text is being edited:
+    /// `{story, anchor, focus, frame, caret: [x0, y0, x1, y1] | null, quads: [[[x, y] ×4] …]}` (page coordinates, pt).
+    /// The host draws the caret and the highlight over its canvas; typing goes through `text.*` commands.
+    #[wasm_bindgen(js_name = textState)]
+    pub fn text_state(&self, abs: usize) -> Result<String, JsError> {
+        use designcraft_engine::compose;
+        use designcraft_geom::Point;
+        let st = self.session.doc().map_err(err)?;
+        let doc = &st.doc;
+        let Some(ts) = st.selection.text else { return Ok("null".into()) };
+        let (si, pi) = doc.page_loc(abs).ok_or_else(|| err("no such page"))?;
+        let page = doc.spreads.get(si).and_then(|s| s.pages.get(pi)).ok_or_else(|| err("no such page"))?.bounds();
+        let cs = self.session.cache.get(doc, ts.story, None);
+        let frame_xf = |id: designcraft_engine::doc::ItemId| {
+            let loc = doc.find(id)?;
+            let it = doc.item(id)?;
+            Some(doc.parent_xf(&loc) * doc.text_xf(it))
+        };
+        let pt = |p: Point| [p.x - page.x0, p.y - page.y0];
+        let range = ts.range();
+        let mut quads = Vec::new();
+        if !range.is_empty() {
+            for ft in &cs.frames {
+                let Some(m) = frame_xf(ft.frame) else { continue };
+                for l in &ft.lines {
+                    let s = range.start.max(l.range.start);
+                    let e = range.end.min(l.range.end);
+                    if s > e || (s == e && !(l.range.end < range.end && e == l.range.end)) {
+                        continue;
+                    }
+                    let past = e == l.range.end && range.end > l.range.end;
+                    for q in compose::highlight_quads(l, s, e, past) {
+                        quads.push(q.map(|p| pt(m * p)));
+                    }
+                }
+            }
+        }
+        let mut caret = serde_json::Value::Null;
+        let mut frame = serde_json::Value::Null;
+        if let Some((fi, x, bl, asc, desc)) = compose::caret(&cs, ts.focus)
+            && let Some(ft) = cs.frames.get(fi)
+            && let Some(m) = frame_xf(ft.frame)
+        {
+            let a = pt(m * Point::new(x, bl - asc));
+            let b = pt(m * Point::new(x, bl + desc));
+            caret = serde_json::json!([a[0], a[1], b[0], b[1]]);
+            frame = serde_json::json!(ft.frame.0);
+        }
+        Ok(serde_json::json!({"story": ts.story.0, "anchor": ts.anchor, "focus": ts.focus, "frame": frame, "caret": caret, "quads": quads}).to_string())
+    }
+
     /// Page `abs` in pt `[width, height, x0, y0]` — x0/y0 = its origin in spread coordinates
     /// (commands such as `transform.resize` take spread coordinates; `frames` reports page coordinates).
     #[wasm_bindgen(js_name = pageSize)]
