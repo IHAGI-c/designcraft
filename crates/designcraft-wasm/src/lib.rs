@@ -22,6 +22,8 @@ pub struct Engine {
     y: u32,
     /// The document as last drawn (what the host canvas shows) — damage is measured against it.
     shown: Option<Arc<Document>>,
+    /// An open undo group (`beginGroup`): the document's uid, the undo depth when it began, the history limit to restore.
+    group: Option<(u64, usize, usize)>,
 }
 
 /// Screen drawing: hairlines at least one device pixel (the file keeps its weights — same rule as the host app's PPT viewer).
@@ -37,7 +39,7 @@ fn err(e: impl std::fmt::Display) -> JsError {
 impl Engine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Engine {
-        Engine { session: Session::new(), renderer: Renderer::new(), width: 0, height: 0, x: 0, y: 0, shown: None }
+        Engine { session: Session::new(), renderer: Renderer::new(), width: 0, height: 0, x: 0, y: 0, shown: None, group: None }
     }
 
     /// Add TTF/OTF/TTC bytes to the shared fonts. Returns the number of faces added.
@@ -50,6 +52,7 @@ impl Engine {
     pub fn open(&mut self, bytes: &[u8]) -> Result<usize, JsError> {
         let doc = designcraft_format::load(bytes).map_err(err)?;
         self.shown = None;
+        self.group = None;
         let i = self.session.add_document(DocState::new(doc, None));
         self.session.set_active(i);
         Ok(self.session.doc().map_err(err)?.doc.page_count())
@@ -60,6 +63,57 @@ impl Engine {
         let p: serde_json::Value = serde_json::from_str(params).map_err(err)?;
         let v = self.session.execute(id, &p).map_err(err)?;
         Ok(v.to_string())
+    }
+
+    /// Start an undo group: every edit until `endGroup` becomes one undo step (a drag that moves the
+    /// frame on each screen refresh, a burst of typing). Starting a new group ends the open one.
+    #[wasm_bindgen(js_name = beginGroup)]
+    pub fn begin_group(&mut self) -> Result<(), JsError> {
+        self.end_group(None)?;
+        let st = self.session.doc_mut().map_err(err)?;
+        // No trimming while the group is open, so the depth it began at stays the right index.
+        self.group = Some((st.uid, st.history.undo.len(), st.history.limit));
+        st.history.limit = usize::MAX;
+        Ok(())
+    }
+
+    /// End the open undo group: the edits since `beginGroup` collapse into one step (labelled `label`
+    /// when given). Returns whether the group left a step. No open group → false.
+    #[wasm_bindgen(js_name = endGroup)]
+    pub fn end_group(&mut self, label: Option<String>) -> Result<bool, JsError> {
+        let Some((uid, start, limit)) = self.group.take() else { return Ok(false) };
+        let Some(st) = self.session.active_mut().filter(|s| s.uid == uid) else { return Ok(false) };
+        let h = &mut st.history;
+        h.limit = limit;
+        // An undo inside the group can take the depth below where it began — the group is then what is left.
+        let start = start.min(h.undo.len());
+        let made = h.undo.len() > start;
+        if made {
+            // The first step holds the document from before the group; the later ones are in-between states.
+            h.undo.truncate(start + 1);
+            if let (Some(l), Some(e)) = (label, h.undo.last_mut()) {
+                e.label = l;
+            }
+        }
+        while h.undo.len() > h.limit.max(1) {
+            h.undo.remove(0);
+        }
+        Ok(made)
+    }
+
+    /// Drop the open undo group and put the document back as it was when the group began (a drag cut short).
+    #[wasm_bindgen(js_name = cancelGroup)]
+    pub fn cancel_group(&mut self) -> Result<(), JsError> {
+        let Some((uid, start, limit)) = self.group.take() else { return Ok(()) };
+        let Some(st) = self.session.active_mut().filter(|s| s.uid == uid) else { return Ok(()) };
+        st.history.limit = limit;
+        if let Some(e) = st.history.undo.get(start).cloned() {
+            st.doc = e.doc;
+            st.selection = e.selection;
+            st.history.undo.truncate(start);
+            st.revision += 1;
+        }
+        Ok(())
     }
 
     /// Draw page `abs` (0-based) at `scale` px/pt → straight RGBA8; size in `width` / `height`.
@@ -268,6 +322,7 @@ impl Engine {
             self.session.close_document(0);
         }
         self.shown = None;
+        self.group = None;
     }
 
     #[wasm_bindgen(getter)]
