@@ -148,7 +148,7 @@ impl Engine {
             if b.x1 <= page.x0 || b.x0 >= page.x1 || it.hidden || it.opacity <= 0.0 {
                 continue;
             }
-            out.push(self.item_json(doc, it, b, &rel, None));
+            out.push(self.item_json(doc, it, b, &rel, None, Affine::IDENTITY));
             // Text frames inside a group (chart numbers, legend, table cells): listed after it with `parent`,
             // so the host can select the group first and the text on a second click.
             if let Content::Group { items } = &it.content {
@@ -157,7 +157,8 @@ impl Engine {
                     match &c.content {
                         Content::Text(_) => {
                             let cb = it.xf.transform_rect_bbox(c.visible_bounds());
-                            out.push(self.item_json(doc, c, cb, &rel, Some(it.id.0)));
+                            // the group's own transform (a moved group) applies to the text inside it too
+                            out.push(self.item_json(doc, c, cb, &rel, Some(it.id.0), it.xf));
                         }
                         Content::Group { items } => stack.extend(items.iter().map(|x| x.as_ref())),
                         _ => {}
@@ -272,6 +273,7 @@ impl Engine {
         b: designcraft_geom::Rect,
         rel: &dyn Fn([f64; 4]) -> [f64; 4],
         parent: Option<u64>,
+        parent_xf: Affine,
     ) -> serde_json::Value {
         let kind = match &it.content {
             Content::Text(_) => "text",
@@ -290,7 +292,7 @@ impl Engine {
         if let Content::Text(t) = &it.content {
             let cs = self.session.cache.get(doc, t.story, None);
             if let Some(ft) = cs.frame(it.id) {
-                let xf = doc.text_xf(it);
+                let xf = parent_xf * doc.text_xf(it);
                 let mut ink: Option<[f64; 4]> = None;
                 for l in &ft.lines {
                     let Some(g0) = l.glyphs.iter().find(|g| g.visible) else { continue };
