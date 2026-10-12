@@ -148,36 +148,22 @@ impl Engine {
             if b.x1 <= page.x0 || b.x0 >= page.x1 || it.hidden || it.opacity <= 0.0 {
                 continue;
             }
-            let kind = match &it.content {
-                Content::Text(_) => "text",
-                Content::Graphic(_) => "picture",
-                Content::Group { .. } => "group",
-                Content::Unassigned if b.width() < 2.0 || b.height() < 2.0 => "line",
-                Content::Unassigned => "shape",
-            };
-            let mut v = serde_json::json!({"id": it.id.0, "kind": kind, "box": rel([b.x0, b.y0, b.x1, b.y1])});
-            if !it.label.is_empty() {
-                v["label"] = serde_json::json!(it.label);
-            }
-            if let Content::Text(t) = &it.content {
-                let cs = self.session.cache.get(doc, t.story, None);
-                if let Some(ft) = cs.frame(it.id) {
-                    let xf = doc.text_xf(it);
-                    let mut ink: Option<[f64; 4]> = None;
-                    for l in &ft.lines {
-                        let Some(g0) = l.glyphs.iter().find(|g| g.visible) else { continue };
-                        let r = designcraft_geom::Rect::new(g0.x, l.baseline - l.ascent, l.end_x, l.baseline + l.descent);
-                        let q = xf.transform_rect_bbox(r);
-                        ink = Some(ink.map_or([q.x0, q.y0, q.x1, q.y1], |a| [a[0].min(q.x0), a[1].min(q.y0), a[2].max(q.x1), a[3].max(q.y1)]));
-                    }
-                    v["story"] = serde_json::json!(t.story.0);
-                    v["text"] = serde_json::json!(doc.story(t.story).and_then(|st| st.text.get(ft.range.clone())).unwrap_or(""));
-                    if let Some(i) = ink {
-                        v["ink"] = serde_json::json!(rel(i));
+            out.push(self.item_json(doc, it, b, &rel, None));
+            // Text frames inside a group (chart numbers, legend, table cells): listed after it with `parent`,
+            // so the host can select the group first and the text on a second click.
+            if let Content::Group { items } = &it.content {
+                let mut stack: Vec<&designcraft_engine::doc::Item> = items.iter().map(|c| c.as_ref()).collect();
+                while let Some(c) = stack.pop() {
+                    match &c.content {
+                        Content::Text(_) => {
+                            let cb = it.xf.transform_rect_bbox(c.visible_bounds());
+                            out.push(self.item_json(doc, c, cb, &rel, Some(it.id.0)));
+                        }
+                        Content::Group { items } => stack.extend(items.iter().map(|x| x.as_ref())),
+                        _ => {}
                     }
                 }
             }
-            out.push(v);
         }
         Ok(serde_json::Value::Array(out).to_string())
     }
@@ -224,6 +210,51 @@ impl Engine {
     /// The active document as `.designcraft` bytes.
     pub fn save(&self) -> Result<Vec<u8>, JsError> {
         designcraft_format::save(&self.session.doc().map_err(err)?.doc).map_err(err)
+    }
+}
+
+impl Engine {
+    fn item_json(
+        &self,
+        doc: &Document,
+        it: &designcraft_engine::doc::Item,
+        b: designcraft_geom::Rect,
+        rel: &dyn Fn([f64; 4]) -> [f64; 4],
+        parent: Option<u64>,
+    ) -> serde_json::Value {
+        let kind = match &it.content {
+            Content::Text(_) => "text",
+            Content::Graphic(_) => "picture",
+            Content::Group { .. } => "group",
+            Content::Unassigned if b.width() < 2.0 || b.height() < 2.0 => "line",
+            Content::Unassigned => "shape",
+        };
+        let mut v = serde_json::json!({"id": it.id.0, "kind": kind, "box": rel([b.x0, b.y0, b.x1, b.y1])});
+        if let Some(p) = parent {
+            v["parent"] = serde_json::json!(p);
+        }
+        if !it.label.is_empty() {
+            v["label"] = serde_json::json!(it.label);
+        }
+        if let Content::Text(t) = &it.content {
+            let cs = self.session.cache.get(doc, t.story, None);
+            if let Some(ft) = cs.frame(it.id) {
+                let xf = doc.text_xf(it);
+                let mut ink: Option<[f64; 4]> = None;
+                for l in &ft.lines {
+                    let Some(g0) = l.glyphs.iter().find(|g| g.visible) else { continue };
+                    let r = designcraft_geom::Rect::new(g0.x, l.baseline - l.ascent, l.end_x, l.baseline + l.descent);
+                    let q = xf.transform_rect_bbox(r);
+                    ink = Some(ink.map_or([q.x0, q.y0, q.x1, q.y1], |a| [a[0].min(q.x0), a[1].min(q.y0), a[2].max(q.x1), a[3].max(q.y1)]));
+                }
+                v["story"] = serde_json::json!(t.story.0);
+                v["text"] = serde_json::json!(doc.story(t.story).and_then(|st| st.text.get(ft.range.clone())).unwrap_or(""));
+                if let Some(i) = ink {
+                    v["ink"] = serde_json::json!(rel(i));
+                }
+            }
+        }
+        v
     }
 }
 
