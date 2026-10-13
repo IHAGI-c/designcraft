@@ -187,7 +187,7 @@ impl Engine {
     }
 
     /// Top-level items on page `abs` (page coordinates, pt), front-most last, as JSON:
-    /// `[{id, kind: text|picture|group|shape|line, box, label?, story?, ink?, text?}]` — `box` = visible bounds,
+    /// `[{id, kind: text|picture|group|shape|line, box, label?, story?, ink?, text?, tables?}]` — `box` = visible bounds,
     /// text frames add `ink` (where the composed lines sit — the frame can be taller than its text) and the
     /// part of the story shown in the frame.
     pub fn items(&self, abs: usize) -> Result<String, JsError> {
@@ -390,6 +390,20 @@ impl Engine {
                 v["text"] = serde_json::json!(doc.story(t.story).and_then(|st| st.text.get(ft.range.clone())).unwrap_or(""));
                 if let Some(i) = ink {
                     v["ink"] = serde_json::json!(rel(i));
+                }
+                // Tables anchored in the part of the story shown in this frame (Table Design: table.select {table}).
+                if let Some(st) = doc.story(t.story) {
+                    let tables: Vec<u64> = st
+                        .para_ranges()
+                        .iter()
+                        .zip(st.paras.iter())
+                        .filter(|(r, _)| r.start < ft.range.end && r.end >= ft.range.start)
+                        .filter_map(|(_, p)| p.table)
+                        .filter(|id| st.tables.contains_key(id))
+                        .collect();
+                    if !tables.is_empty() {
+                        v["tables"] = serde_json::json!(tables);
+                    }
                 }
             }
         }
