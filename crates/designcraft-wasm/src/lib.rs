@@ -284,6 +284,15 @@ impl Engine {
         Ok(a.data.to_vec())
     }
 
+    /// The look of item `id` that `document.inspect` leaves out, as JSON: `{opacity, blend, effects, corners}`
+    /// (host: the Shape Effects / Text Shadow state and the current values in its properties panel).
+    #[wasm_bindgen(js_name = itemStyle)]
+    pub fn item_style(&self, id: u64) -> Result<String, JsError> {
+        let doc = &self.session.doc().map_err(err)?.doc;
+        let it = doc.item(designcraft_engine::doc::ItemId(id)).ok_or_else(|| err("no such item"))?;
+        Ok(serde_json::json!({"opacity": it.opacity, "blend": it.blend, "effects": it.effects, "corners": it.corners}).to_string())
+    }
+
     /// Replace the picture in item `id` with `bytes` (an adjusted copy) — one undoable step, every placement of it.
     #[wasm_bindgen(js_name = replaceGraphic)]
     pub fn replace_graphic(&mut self, id: u64, bytes: Vec<u8>) -> Result<(), JsError> {
