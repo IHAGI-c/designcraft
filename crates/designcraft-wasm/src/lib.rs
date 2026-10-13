@@ -293,11 +293,26 @@ impl Engine {
         Ok(serde_json::json!({"opacity": it.opacity, "blend": it.blend, "effects": it.effects, "corners": it.corners}).to_string())
     }
 
-    /// Replace the picture in item `id` with `bytes` (an adjusted copy) — one undoable step, every placement of it.
+    /// Replace the picture in item `id` with `bytes` (an adjusted copy) — one undoable step (recorded here: `Session::edit` alone records none), every placement of it.
     #[wasm_bindgen(js_name = replaceGraphic)]
     pub fn replace_graphic(&mut self, id: u64, bytes: Vec<u8>) -> Result<(), JsError> {
         let px = designcraft_render::image_size(&bytes).ok_or_else(|| err("unsupported or corrupt image"))?;
         let mime = designcraft_render::image_mime(&bytes).to_string();
+        // Session::edit does not record undo — push the document from before the change (as a command does),
+        // so ⌘Z brings the previous picture back.
+        {
+            let st = self.session.doc_mut().map_err(err)?;
+            let pic = st.doc.item(designcraft_engine::doc::ItemId(id)).is_some_and(|it| matches!(it.content, Content::Graphic(_)));
+            if !pic {
+                return Err(err("not a picture"));
+            }
+            let before = designcraft_engine::HistoryEntry { label: "Adjust Picture".into(), doc: st.doc.clone(), selection: st.selection.clone() };
+            st.history.undo.push(before);
+            st.history.redo.clear();
+            while st.history.undo.len() > st.history.limit.max(1) {
+                st.history.undo.remove(0);
+            }
+        }
         self.session
             .edit(|d, _| {
                 let it = d.item(designcraft_engine::doc::ItemId(id)).ok_or(designcraft_engine::doc::DocError::NoItem(designcraft_engine::doc::ItemId(id)))?;
